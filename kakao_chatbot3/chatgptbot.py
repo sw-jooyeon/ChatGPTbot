@@ -9,6 +9,8 @@ import threading
 import json
 import pytesseract
 import io
+import cv2
+import numpy as np
 
 # Flask 앱 객체 생성
 app = Flask(__name__)
@@ -20,7 +22,84 @@ CHAT_MODEL_CONTEXT = "친절한 말투를 사용해줘."
 client = OpenAI(api_key="(OpenAI API 키 입력하기)")
 
 
-# Callback
+# Callback - OCR
+def img_reply(callback_url, img_url):
+
+    try:
+    
+        print("=== img_reply 시작 ===")
+        print(f"img_url: {img_url}")
+        print(f"callback_url: {callback_url}")
+
+        # 이미지 다운로드 + 다운로드 실패 체크
+        img_res = requests.get(img_url)
+        img_res.raise_for_status()
+        img = Image.open(io.BytesIO(img_res.content))
+        
+        # 이미지 확인
+        img.show()
+        
+        # OpenCV로 그레이스케일 변환 후 이진화
+        img_np = np.array(img)
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        
+        #다시 PIL 이미지로 변환
+        processed_img = Image.fromarray(thresh)
+    
+        # OCR
+        extracted_txt = pytesseract.image_to_string(processed_img, lang='kor+eng')
+        
+        print("=== OCR 완료 ===")
+        print(extracted_txt)
+        
+        # 응답 형식
+        response = {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": f"{extracted_txt or '텍스트를 인식하지 못했습니다.'}"
+                        }
+                    }
+                ]
+            }
+        }
+    
+        res = requests.post(callback_url, json=response)
+        print(f"콜백 응답 상태: {res.status_code}")
+        print(f"콜백 응답 내용: {res.text}")
+    
+    except Exception as e:
+    
+            print(f"img_reply 에러 발생: {e}")
+            
+            # 에러 메시지 콜백 전송
+            try:
+                error_response = {
+                        "version": "2.0",
+                        "template": {
+                                "outputs": [
+                                        {
+                                                "simpleText": {
+                                                        "text": f"OCR 처리 중 오류 발생: {str(e)}"
+                                                }
+                                        }
+                                ]
+                        }
+                }
+                
+                requests.post(callback_url, json=error_response)
+        
+            except Exception as callback_error:
+            
+                print(f"콜백 응답 중 에러: {callback_error}")
+		
+    return 'OK'
+
+
+# Callback - OCR
 def gpt_reply(callback_url, msg, is_summary=False):
     
     # 시스템 컨텍스트로 메시지 리스트 초기화
@@ -112,12 +191,13 @@ def chat_summary():
     })
 
 
+# 이미지 내 텍스트 추출
 @app.route('/img', methods=['POST'])
 def img_txt():
     
     # 사용자 요청 데이터 추출
     user_request = request.json.get('userRequest', {})
-    # callback_url = user_request.get('callbackUrl')
+    callback_url = user_request.get('callbackUrl')
     # utterance = user_request.get('utterance', '')
     
     # 액션 파라미터
@@ -133,29 +213,13 @@ def img_txt():
     urls = secure_urls_str[5:-1].split(', ')
     img_url = urls[0]
 
-    # 이미지 다운로드
-    img_res = requests.get(img_url)
-    img = Image.open(io.BytesIO(img_res.content))
-
-    # OCR
-    extracted_txt = pytesseract.image_to_string(img, lang='kor+eng')
-
     # 비동기 처리
-    # threading.Thread(target=gpt_reply, args=(callback_url, utterance)).start()
+    threading.Thread(target=gpt_reply, args=(callback_url, utterance)).start()
     
     #JSON 응답 반환
     return jsonify({
         "version": "2.0",
-        "template": {
-            "outputs": [
-                {
-                    "simpleText": {
-                        "text": f"{extracted_txt}"
-
-                    }
-                }
-            ]
-        }
+        "useCallback": True
     })
 
 
